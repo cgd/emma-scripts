@@ -31,6 +31,39 @@ readSnpsAsBinaryMatrix <- function(csvSNPFile)
     snpMatrixToBinary(snpMat)
 }
 
+readSNPs <- function(
+        csvSNPFile,
+        chromosomeColumn,
+        basePairPositionColumn,
+        preserveColumns,
+        aAlleleColumn,
+        bAlleleColumn,
+        firstGenotypeColumn,
+        lastGenotypeColumn,
+        strainNames)
+{
+    csvSNPFile <- file(csvSNPFile, open = "rt")
+    
+    # take a look at the header and make sure the strains match up perfectly
+    fileHeader <- read.csv(csvSNPFile, colClasses="character", nrows = 1)[1, ]
+    if(is.null(lastGenotypeColumn))
+    {
+        lastGenotypeColumn <- length(fileHeader)
+    }
+    
+    snpData <- list()
+    snpData$allStrainNames <- fileHeader[firstGenotypeColumn : lastGenotypeColumn]
+    snpData$keptStrainNames <- sort(snpData$allStrainNames[snpData$allStrainNames %in% strainNames])
+    
+    if(snpData$keptStrainNames < 4)
+    {((( here we are
+        stop("There are not enough matching strain names available for testing.",
+             "We only have: ", paste())
+    }
+    
+    snpData
+}
+
 # convert the given case insensitive g,a,c,t character matrix into a 0/1 integer matrix
 snpMatrixToBinary <- function(snpMat)
 {
@@ -81,7 +114,18 @@ mpdPhenosToPhenoOnly <- function(mpdPhenos)
     rbind(NULL, as.numeric(mpdPhenos[["value"]]))
 }
 
-emmaScan <- function(mpdPhenoFile, genoFiles, resultsDir)
+emmaScan <- function(
+        mpdPhenoFile,
+        genoFiles,
+        resultsDir,
+        chromosomeColumn = 4,
+        basePairPositionColumn = 5,
+        preserveColumns = 1 : 5,
+        aAlleleColumn = 2,
+        bAlleleColumn = 3,
+        firstGenotypeColumn,
+        lastGenotypeColumn = NULL,
+        verbose = TRUE)
 {
     # read in SNPs and calculate the kinship matrix
     #
