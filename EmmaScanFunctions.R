@@ -13,25 +13,200 @@
 # is the same (it is OK for the phenotype file to have multiple rows for a
 # single strain, but they must occur in the correct order)
 #
-# Here is a simple example of how you might invoke this script:
+# Here is a simple example of how you might invoke the functions in this script:
 # source("EmmaScanFunctions.R")
-# emmaScan(
-#     genoFiles=dir("geno-data", full.names=T),
-#     mpdPhenoFile="mpd-formatted-phenotypes.txt",
-#     resultsDir="emma-scan-results")
+# scanResults <- emmaScan(
+#   mpdPhenoFile = "mpd-formatted-phenotypes.txt",
+#   genoFiles = dir("geno-data", full.names = T))
 
 library(emma)
 
-# reads in the given CSV file with a header row for strains and a,g,c,t (case-insensitive)
-# for all values and return a matrix of 1,0 values where 1 means that the leftmost
-# strain is matched and 0 means there is a difference
-readSnpsAsBinaryMatrix <- function(csvSNPFile)
+emmaScan <- function(
+        mpdPhenoFile,
+        genoFiles,
+        chromosomeColumn = 4,
+        basePairPositionColumn = 5,
+        preserveColumns = 1 : 5,
+        aAlleleColumn = 2,
+        bAlleleColumn = 3,
+        firstGenotypeColumn = 6,
+        lastGenotypeColumn = NULL,
+        sex = c("both", "male", "female"),
+        cluster = NULL,
+        verbose = TRUE,
+        phenoAggregateFun = mean)
 {
-    snpMat <- read.csv(csvSNPFile, colClasses="character")
-    snpMatrixToBinary(snpMat)
+    sex <- match.arg(sex)
+    
+    # read in pheno data
+    if(verbose)
+    {
+        cat("reading phenotypes\n")
+    }
+    mpdPhenos <- .readMpdIndividualPhenotypes(mpdPhenoFile)
+    if(verbose)
+    {
+        cat("read ", nrow(mpdPhenos), " phenotypes\n", sep = "")
+    }
+    unfilteredPhenoStrains <- sort(unique(mpdPhenos[["strain"]]))
+    if(sex != "both")
+    {
+        if(sex != "male" && sex != "female")
+        {
+            stop("bad value given for sex parameter")
+        }
+        
+        if("sex" %in% names(mpdPhenos))
+        {
+            phenoSex <- toupper(mpdPhenos[["sex"]])
+            if(sex == "male")
+            {
+                sexFilter <- phenoSex == "MALE" | phenoSex == "M"
+                if(verbose)
+                {
+                    cat("removing ", sum(!sexFilter), " female phenotypes\n")
+                }
+            }
+            else
+            {
+                sexFilter <- phenoSex == "FEMALE" | phenoSex == "F"
+                if(verbose)
+                {
+                    cat("removing ", sum(!sexFilter), " male phenotypes\n")
+                }
+            }
+            
+            mpdPhenos <- mpdPhenos[sexFilter, ]
+        }
+        else
+        {
+            stop("failed to find \"sex\" column in phenotype file")
+        }
+    }
+    
+    if(!is.null(phenoAggregateFun))
+    {
+        aggPhenos <- aggregate(mpdPhenos[["value"]], by = list(mpdPhenos[["strain"]]), FUN = mean)
+        mpdPhenos <- data.frame(strain = aggPhenos[[1]], value = aggPhenos[[2]], stringsAsFactors = FALSE)
+    }
+    mpdPhenos <- mpdPhenos[order(mpdPhenos[["strain"]]), ]
+    
+    phenoStrains <- sort(unique(mpdPhenos[["strain"]]))
+    
+    if(verbose && !setequal(unfilteredPhenoStrains, phenoStrains))
+    {
+        cat("The following strains were removed during the sex filter phase: ",
+                paste(setdiff(unfilteredPhenoStrains, phenoStrains), collapse = ", "),
+                "\n")
+    }
+    
+    # read in SNPs and calculate the kinship matrix
+    #
+    # snpMatrixList - a list of SNP matrices (one per genoFile)
+    # allSnpsMatrix - combines all SNPs into a single matrix for calculating kinship
+    #snpMatrixList <- NULL
+    #allSnpsMatrix <- NULL
+    snpDataList <- list()
+    allSnpData <- NULL
+    for(genoFile in genoFiles)
+    {
+        if(verbose)
+        {
+            cat("reading in genotypes from: ", genoFile, "\n", sep = "")
+        }
+        currSNPData <- .readSNPData(
+                genoFile,
+                chromosomeColumn,
+                basePairPositionColumn,
+                preserveColumns,
+                aAlleleColumn,
+                bAlleleColumn,
+                firstGenotypeColumn,
+                lastGenotypeColumn,
+                phenoStrains)
+        snpDataList[[genoFile]] <- currSNPData
+        allSnpData <- .bindSnpData(allSnpData, currSNPData)
+    }
+    
+    # subset phenotypes based on strains available in genotypes
+    if(verbose)
+    {
+        removedGenoStrains <- setdiff(allSnpData$allStrainNames, phenoStrains)
+        if(length(removedGenoStrains) >= 1)
+        {
+            cat("Removed ", length(removedGenoStrains), " strains from the genotype data ",
+                    "because they were missing from the phenotype data: ",
+                    paste(removedGenoStrains, collapse = ", "), "\n", sep = "")
+        }
+        
+        removedPhenoStrains <- setdiff(phenoStrains, allSnpData$allStrainNames)
+        if(length(removedPhenoStrains) >= 1)
+        {
+            cat("Removed ", length(removedPhenoStrains), " strains from the phenotype data ",
+                    "because they were missing from the genotype data: ",
+                    paste(removedPhenoStrains, collapse = ", "), "\n", sep = "")
+        }
+        
+        cat("The scan will be performed using the following ",
+                length(allSnpData$keptStrainNames), " strains: ",
+                paste(allSnpData$keptStrainNames, collapse = ", "), "\n", sep = "")
+    }
+    mpdPhenos <- mpdPhenos[mpdPhenos[["strain"]] %in% allSnpData$keptStrainNames, ]
+    
+    if(verbose)
+    {
+        cat("calculating kinship\n")
+    }
+    kinshipMat <- emma.kinship(allSnpData$snpCalls)
+    
+    incMat <- .mpdPhenosToStrainIncidenceMatrix(mpdPhenos)
+    phenosOnly <- .mpdPhenosToPhenoOnly(mpdPhenos)
+    
+    if(length(cluster) >= 2)
+    {
+        if(verbose)
+        {
+            cat("running EMMA scan using ", length(cluster), " cluster nodes\n", sep = "")
+        }
+        chunkedCalls <- .chunkRows(allSnpData$snpCalls, length(cluster))
+        scanForApply <- function(snpMat, phenos, kin, inc)
+        {
+            .listToDataFrame(emma.REML.t(ys = phenos, xs = snpMat, K = kin, Z = inc))
+        }
+        chunkResults <- parLapply(
+                cluster,
+                chunkedCalls,
+                scanForApply,
+                phenosOnly,
+                kinshipMat,
+                incMat)
+        results <- NULL
+        for(res in chunkResults)
+        {
+            results <- rbind(results, res)
+        }
+    }
+    else
+    {
+        if(verbose)
+        {
+            cat("running EMMA scan\n", sep = "")
+        }
+        results <- .listToDataFrame(emma.REML.t(
+                        ys = phenosOnly,
+                        xs = allSnpData$snpCalls,
+                        K = kinshipMat,
+                        Z = incMat))
+    }
+    
+    if(length(preserveColumns) >= 1)
+    {
+        results <- cbind(allSnpData$preservedColumns, results)
+    }
+    results
 }
 
-readSNPs <- function(
+.readSNPData <- function(
         csvSNPFile,
         chromosomeColumn,
         basePairPositionColumn,
@@ -45,7 +220,7 @@ readSNPs <- function(
     csvSNPFile <- file(csvSNPFile, open = "rt")
     
     # take a look at the header and make sure the strains match up perfectly
-    fileHeader <- read.csv(csvSNPFile, colClasses="character", nrows = 1)[1, ]
+    fileHeader <- read.csv(csvSNPFile, colClasses="character", header = FALSE, nrows = 1)[1, ]
     if(is.null(lastGenotypeColumn))
     {
         lastGenotypeColumn <- length(fileHeader)
@@ -55,127 +230,182 @@ readSNPs <- function(
     snpData$allStrainNames <- fileHeader[firstGenotypeColumn : lastGenotypeColumn]
     snpData$keptStrainNames <- sort(snpData$allStrainNames[snpData$allStrainNames %in% strainNames])
     
-    if(snpData$keptStrainNames < 4)
-    {((( here we are
-        stop("There are not enough matching strain names available for testing.",
-             "We only have: ", paste())
-    }
+    snpColsToKeep <- match(snpData$keptStrainNames, snpData$allStrainNames)
+    snpColsToKeep <- snpColsToKeep + (firstGenotypeColumn - 1)
+    
+    fileData <- read.csv(csvSNPFile, colClasses = "character", header = FALSE)
+    close(csvSNPFile)
+    
+    snpData$snpCalls <- as.matrix(fileData[ , snpColsToKeep, drop = FALSE])
+    snpData$snpCalls <- .snpCallsToNumeric(
+            fileData[ , aAlleleColumn],
+            fileData[ , bAlleleColumn],
+            snpData$snpCalls)
+    
+    snpData$preservedColumnNames <- fileHeader[preserveColumns]
+    snpData$preservedColumns <- fileData[ , preserveColumns, drop = FALSE]
+    names(snpData$preservedColumns) <- snpData$preservedColumnNames
+    
+    snpData$position <- data.frame(
+            chromosome = fileData[ , chromosomeColumn],
+            bpPosition = as.numeric(fileData[ , basePairPositionColumn]),
+            stringsAsFactors = FALSE)
     
     snpData
 }
 
-# convert the given case insensitive g,a,c,t character matrix into a 0/1 integer matrix
-snpMatrixToBinary <- function(snpMat)
+# concatenate SNP data
+.bindSnpData <- function(snpData1, snpData2)
 {
-    # the '1' strains match the 1st strain and the others will be '0'
-    binMat <- t(apply(snpMat, 1, function(snpRow) {as.integer(toupper(snpRow) == toupper(snpRow[1]))}))
+    if(is.null(snpData1))
+    {
+        snpData2
+    }
+    else if(is.null(snpData2))
+    {
+        snpData1
+    }
+    else
+    {
+        snpData1$allStrainNames <- union(snpData1$allStrainNames, snpData$allStrainNames)
+        
+        if((!setequal(snpData1$keptStrainNames, snpData2$keptStrainNames)) &&
+           (!setequal(snpData1$preservedColumnNames, snpData2$preservedColumnNames)))
+        {
+            stop("column missmatch between geno files")
+        }
+        else
+        {
+            snpData1$snpCalls <- rbind(snpData1$snpCalls, snpData2$snpCalls)
+            snpData1$position <- rbind(snpData1$position, snpData2$position)
+            snpData1$preservedColumns <- rbind(snpData1$preservedColumns, snpData2$preservedColumns)
+            
+            snpData1
+        }
+    }
+}
 
-    # restore column names and return
-    colnames(binMat) <- colnames(snpMat)
-    binMat
+.snpCallsToNumeric <- function(aAlleles, bAlleles, snpCalls)
+{
+    aAlleles <- toupper(aAlleles)
+    bAlleles <- toupper(bAlleles)
+    snpCalls <- toupper(snpCalls)
+    
+    numMat <- matrix(NaN, nrow = nrow(snpCalls), ncol = ncol(snpCalls))
+    numMat[snpCalls == aAlleles] <- 1.0
+    numMat[snpCalls == bAlleles] <- 0.0
+    numMat[snpCalls == "H"]      <- 0.5
+    
+    numMat
 }
 
 # reads in an "MPD formatted" phenotype file with individual phenotype values
-readMpdIndividualPhenotypes <- function(mpdPhenoFile)
+.readMpdIndividualPhenotypes <- function(mpdPhenoFile)
 {
-    phenoMat <- read.delim(mpdPhenoFile, colClasses="character")
-    phenoMat
+    phenoData <- read.delim(mpdPhenoFile, colClasses = "character")
+    phenoData[["value"]] <- as.numeric(phenoData[["value"]])
+    phenoData
 }
 
 # create the matrix that maps individual values to strains. With the returned
 # matrix the rows represent the individuals and the columns represent what
 # strain those individuals belong to.
-mpdPhenosToStrainIncidenceMatrix <- function(mpdPhenos)
+.mpdPhenosToStrainIncidenceMatrix <- function(mpdPhenos)
 {
     phenoRle <- rle(mpdPhenos[["strain"]])
     strainIndividualCounts <- phenoRle$lengths
-    numStrains <- length(strainIndividualCounts)
     
-    incidenceMatrix <- NULL
-    for(currStrainIndex in 1:numStrains)
+    if(all(strainIndividualCounts) == 1)
     {
-        currStrainIndCount <- strainIndividualCounts[currStrainIndex]
-        
-        currRow <- rep.int(0, numStrains)
-        currRow[currStrainIndex] <- 1
-        
-        for(i in 1:currStrainIndCount)
-        {
-            incidenceMatrix <- rbind(incidenceMatrix, currRow)
-        }
+        NULL
     }
-    
-    incidenceMatrix
+    else
+    {
+        numStrains <- length(strainIndividualCounts)
+        
+        incidenceMatrix <- NULL
+        for(currStrainIndex in 1:numStrains)
+        {
+            currStrainIndCount <- strainIndividualCounts[currStrainIndex]
+            
+            currRow <- rep.int(0, numStrains)
+            currRow[currStrainIndex] <- 1
+            
+            for(i in 1:currStrainIndCount)
+            {
+                incidenceMatrix <- rbind(incidenceMatrix, currRow)
+            }
+        }
+        
+        incidenceMatrix
+    }
 }
 
 # pull out only the phenotype values leaving all of the other MPD data behind
-mpdPhenosToPhenoOnly <- function(mpdPhenos)
+.mpdPhenosToPhenoOnly <- function(mpdPhenos)
 {
     rbind(NULL, as.numeric(mpdPhenos[["value"]]))
 }
 
-emmaScan <- function(
-        mpdPhenoFile,
-        genoFiles,
-        resultsDir,
-        chromosomeColumn = 4,
-        basePairPositionColumn = 5,
-        preserveColumns = 1 : 5,
-        aAlleleColumn = 2,
-        bAlleleColumn = 3,
-        firstGenotypeColumn,
-        lastGenotypeColumn = NULL,
-        verbose = TRUE)
+# returns integer values which can be used to order the given chromosome
+# strings (ie the returned vector is suitable as an input to the order(...)
+# function)
+.chrNameValues <- function(chrNames)
 {
-    # read in SNPs and calculate the kinship matrix
-    #
-    # snpMatrixList - a list of SNP matrices (one per genoFile)
-    # allSnpsMatrix - combines all SNPs into a single matrix for calculating kinship
-    snpMatrixList <- NULL
-    allSnpsMatrix <- NULL
-    for(genoFile in genoFiles)
+    origNames <- chrNames
+    
+    chrNames <- toupper(chrNames)
+    chrNames <- sub("(CHR|CHROMOSOME)", "", chrNames)
+    chrInt <- suppressWarnings(as.integer(chrNames)) 
+    chrInt[chrNames == "X"] <- .Machine$integer.max - as.integer(2)
+    chrInt[chrNames == "Y"] <- .Machine$integer.max - as.integer(1)
+    chrInt[chrNames == "M"] <- .Machine$integer.max
+    
+    if(any(is.na(chrInt)))
     {
-        print(paste("reading in genotypes from:", genoFile))
-        
-        currSnpMatrix <- readSnpsAsBinaryMatrix(genoFile)
-        snpMatrixList <- append(snpMatrixList, list(currSnpMatrix))
-        allSnpsMatrix <- rbind(allSnpsMatrix, currSnpMatrix)
+        stop("unrecognized chromosome name(s): ",
+             paste(unique(origNames[is.na(chrInt)]), collapse = ", "))
     }
     
-    print("calculating kinship")
-    kinshipMat <- emma.kinship(allSnpsMatrix)
-    
-    # read in phenos along with an incidence matrix
-    print("reading phenotypes")
-    mpdPhenos <- readMpdIndividualPhenotypes(mpdPhenoFile)
-    incMat <- mpdPhenosToStrainIncidenceMatrix(mpdPhenos)
-    phenosOnly <- mpdPhenosToPhenoOnly(mpdPhenos)
-    
-    chr <- 0
-    for(snpMatrix in snpMatrixList)
+    chrInt
+}
+
+.listToDataFrame <- function(theList)
+{
+    d <- NULL
+    for(x in theList)
     {
-        chr <- chr + 1
-        
-        print(paste("performing t-test for:", genoFiles[chr]))
-        currScan <- emma.REML.t(ys=phenosOnly, xs=snpMatrix, K=kinshipMat, Z=incMat)
-        
-        print("exporting scan results")
-        scanResultsFile <- paste(resultsDir, "/", "scan", chr, ".csv", sep="")
-        
-        # write some header info
-        fileHandle <- file(scanResultsFile, "a")
-        writeLines(
-            c(paste("genotype data source:", genoFiles[chr]), paste("phenotype data source:", mpdPhenoFile)),
-            fileHandle)
-        close(fileHandle)
-        
-        # write the table
-        write.csv(currScan, file=scanResultsFile, row.names=F, append=T)
-        
-        # create the scan image
-        scanImageFile <- paste(resultsDir, "/", "scan", chr, ".png", sep="")
-        png(filename=scanImageFile, width=800, height=300)
-        plot(-log10(currScan$ps), type="l")
-        dev.off()
+        if(is.null(d))
+        {
+            d <- data.frame(x, stringsAsFactors = F)
+        }
+        else
+        {
+            d <- cbind(d, data.frame(x, stringsAsFactors = F))
+        }
     }
+    colnames(d) <- names(theList)
+    
+    d
+}
+
+.chunkRows <- function(m, chunkCount)
+{
+    rowCount <- nrow(m)
+    chunkSize <- rowCount %/% chunkCount
+    if((rowCount %% chunkCount) != 0)
+    {
+        chunkSize <- chunkSize + 1
+    }
+    
+    chunks <- list()
+    startRow <- 1
+    while(startRow <= rowCount)
+    {
+        endRow <- min(startRow + chunkSize - 1, rowCount)
+        chunks[[length(chunks) + 1]] <- m[startRow : endRow, ]
+        startRow <- endRow + 1
+    }
+    
+    chunks
 }
