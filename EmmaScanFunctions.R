@@ -5,13 +5,7 @@
 # inputs are:
 #   - MPD Phenotypes in the "Individual" data point format.
 #     See: <http://www.jax.org/phenome>
-#   - SNP CSV data files where the 1st row is a header (strain names) and remaining
-#     rows contain SNPs (a,g,c,t) case insensitive. Note: any position or
-#     annotation columns must be removed before using this script since only
-#     SNP columns are allowed
-# Make sure that the strain order used for the phenotype files and genotype files
-# is the same (it is OK for the phenotype file to have multiple rows for a
-# single strain, but they must occur in the correct order)
+#   - SNP CSV data files (see documentation of EMMA scan function for details)
 #
 # Here is a simple example of how you might invoke the functions in this script:
 # source("EmmaScanFunctions.R")
@@ -21,6 +15,38 @@
 
 library(emma)
 
+# Perform an emma scan on MPD "individual" format phenotype data and CGD
+# formatted SNP data. This SNP format is basically a comma-separated file with
+# some annotation columns followed by strain columns. The SNP calls in the
+# strain column should be A/G/C/T/H (case insensitive) and everything else will
+# be treated as a no-call. The file must contain at least the following columns:
+# chromosome, base pair position, A allele (the G/A/C/T value corresponding to
+# the A allele), and B allele. Default parameters are selected to match CGD
+# population study genotypes.
+# PARAMETERS:
+#   mpdPhenoFile: the phenotype file in MPD individual mouse tab-delimited format
+#   genoFiles: a character vector of genotype file names using the format
+#              described above
+#   chromosomeColumn: the column number that specifies the SNP chromosome
+#   basePairPositionColumn: the column number that specifies the base pair position
+#   preserveColumns: column numbers for the columns which should be preserved in
+#                    the results data. This can be NULL.
+#   aAlleleColumn: the column number that has the A allele's call (G/A/C/T)
+#   bAlleleColumn: the column number that has the B allele's call (G/A/C/T)
+#   firstGenotypeColumn: column number for the first sample genotype column (G/A/C/T/H/?)
+#   lastGenotypeColumn: column number for the last sample genotype column (G/A/C/T/H/?)
+#                       if this is NULL then the last column is implied
+#   sex: one of "both", "male" or "female". This will determine which phenotypes
+#        will be used in the scan (specifying "male" means only scan male phenotypes)
+#   cluster: the SNOW cluster to run on. NULL indicates no cluster
+#   verbose: if TRUE print status messages during scan
+#   phenoAggregateFun: the function used to aggregate phenotypes within a strain
+#                      mean is the default but you can for instance use median or
+#                      if you use NULL then all individual data points are passed
+#                      on to the EMMA scan along with an incidence matrix which
+#                      this function will calculate for you
+# VALUE:
+#   a data frame of EMMA scan output along with the preserved columns
 emmaScan <- function(
         mpdPhenoFile,
         genoFiles,
