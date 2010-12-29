@@ -86,7 +86,7 @@ emmaScan <- function(
     
     if(!is.null(phenoAggregateFun))
     {
-        aggPhenos <- aggregate(mpdPhenos[["value"]], by = list(mpdPhenos[["strain"]]), FUN = mean)
+        aggPhenos <- aggregate(mpdPhenos[["value"]], by = list(mpdPhenos[["strain"]]), FUN = phenoAggregateFun)
         mpdPhenos <- data.frame(strain = aggPhenos[[1]], value = aggPhenos[[2]], stringsAsFactors = FALSE)
     }
     mpdPhenos <- mpdPhenos[order(mpdPhenos[["strain"]]), ]
