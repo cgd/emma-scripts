@@ -310,7 +310,7 @@ emmaScan <- function(
     }
     else
     {
-        snpData1$allStrainNames <- union(snpData1$allStrainNames, snpData$allStrainNames)
+        snpData1$allStrainNames <- union(snpData1$allStrainNames, snpData2$allStrainNames)
         
         if((!setequal(snpData1$keptStrainNames, snpData2$keptStrainNames)) &&
            (!setequal(snpData1$preservedColumnNames, snpData2$preservedColumnNames)))
