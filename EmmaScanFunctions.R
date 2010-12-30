@@ -45,8 +45,15 @@ library(emma)
 #                      if you use NULL then all individual data points are passed
 #                      on to the EMMA scan along with an incidence matrix which
 #                      this function will calculate for you
+#   sortResultsByPosition: if TRUE results will be sorted by position before
+#                          being returned, otherwise the SNP order used in the
+#                          returned data will be the same as the order of the
+#                          input data (note that if multiple genoFiles are
+#                          specified that the file order will be respected)
 # VALUE:
-#   a data frame of EMMA scan output along with the preserved columns
+#   a list object with the following components
+#   results: a data frame of EMMA scan output along with the preserved columns
+#   positions: a data frame containing "chromosome" and "bpPosition" components
 emmaScan <- function(
         mpdPhenoFile,
         genoFiles,
@@ -60,7 +67,8 @@ emmaScan <- function(
         sex = c("both", "male", "female"),
         cluster = NULL,
         verbose = TRUE,
-        phenoAggregateFun = mean)
+        phenoAggregateFun = mean,
+        sortResultsByPosition = TRUE)
 {
     sex <- match.arg(sex)
     
@@ -229,7 +237,16 @@ emmaScan <- function(
     {
         results <- cbind(allSnpData$preservedColumns, results)
     }
-    results
+    
+    positions <- allSnpData$position
+    if(sortResultsByPosition)
+    {
+        snpPosOrder <- order(.chrNameValues(positions$chromosome), positions$bpPosition)
+        results <- results[snpPosOrder, ]
+        positions <- positions[snpPosOrder, ]
+    }
+
+    list(results = results, positions = allSnpData$position)
 }
 
 .readSNPData <- function(
